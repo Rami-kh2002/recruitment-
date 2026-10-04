@@ -2799,12 +2799,12 @@ function showBulkUpload(){
 function renderJobs(view){
   const canManage = can('jobs') || can('all');
   view.innerHTML = '<div class="panel"><div class="panel-head"><h3>الشواغر (' + DATA.jobs.length + ')</h3>' +
-    (canManage ? '<button class="btn" id="pubJobsBtn" title="تنزيل jobs.json لرفعه على GitHub">🌐 نشر الشواغر للموقع</button> <button class="btn green" id="newJobBtn">' + ic('plus',15) + ' شاغر جديد</button>' : '') + '</div><div class="panel-body">' +
+    (canManage ? '<button class="btn" id="pubJobsBtn" title="تنزيل jobs.json لرفعه على GitHub">🌐 نشر الشواغر للموقع</button> <button class="btn" id="pubTrackBtn" title="تنزيل tracking.json لرفعه على GitHub">📡 نشر حالات الطلبات</button> <button class="btn green" id="newJobBtn">' + ic('plus',15) + ' شاغر جديد</button>' : '') + '</div><div class="panel-body">' +
     (DATA.jobs.length ? DATA.jobs.slice().sort((a,b)=>b.createdAt-a.createdAt).map(j => jobCardHtml(j, canManage)).join('') :
       '<div class="empty">' + ic('briefcase',32) + '<strong>لا توجد شواغر بعد</strong><span>ابدأ بإنشاء أول شاغر لبدء استقبال الطلبات</span></div>') +
     '</div></div>';
   const nb = $('newJobBtn'); if(nb) nb.onclick = () => showJobForm();
-  const pb = $('pubJobsBtn'); if(pb) pb.onclick = exportPublicJobs;
+  const pb = $('pubJobsBtn'); if(pb) pb.onclick = exportPublicJobs; const ptb = $('pubTrackBtn'); if(ptb) ptb.onclick = exportPublicTracking;
   view.querySelectorAll('[data-togglejob]').forEach(b => b.onclick = () => toggleJob(b.dataset.togglejob));
   view.querySelectorAll('[data-editjob]').forEach(b => b.onclick = () => showJobForm(byId(DATA.jobs, b.dataset.editjob)));
   view.querySelectorAll('[data-deljob]').forEach(b => b.onclick = () => deleteJob(b.dataset.deljob));
@@ -3817,6 +3817,61 @@ function hidePortal(){
   try { history.replaceState(null, '', location.pathname); } catch(e){}
 }
 /* — تتبع حالة الطلب (بدون تسجيل دخول): يبحث المرشح عن طلبه بالبريد/الجوال + رمز التتبع — */
+/* — تتبع الطلب من أي جهاز: ملف tracking.json عام يحوي بصمات (SHA-256) لا بيانات شخصية — */
+window.PUBLIC_TRACK = null;
+async function trackHash(contact, code){
+  const data = new TextEncoder().encode(norm(contact) + '|' + String(code).trim().toUpperCase());
+  const buf = await crypto.subtle.digest('SHA-256', data);
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2,'0')).join('');
+}
+async function loadPublicTracking(){
+  if(location.protocol === 'file:') return [];
+  try {
+    const r = await fetch('tracking.json?ts=' + Date.now(), {cache:'no-store'});
+    if(!r.ok) return [];
+    const arr = await r.json();
+    window.PUBLIC_TRACK = Array.isArray(arr) ? arr : [];
+  } catch(e){ window.PUBLIC_TRACK = []; }
+  return window.PUBLIC_TRACK;
+}
+async function trackRemoteLookup(contact, code, res){
+  res.innerHTML = '<div class="empty" style="padding:16px"><span>⏳ جارٍ البحث…</span></div>';
+  try {
+    const list = await loadPublicTracking();
+    const k = await trackHash(contact, code);
+    const it = list.find(x => x && x.k === k);
+    if(!it){ res.innerHTML = '<div class="empty" style="padding:16px"><span>لم يُعثر على طلب مطابق للبيانات المُدخلة. إذا قدّمت طلبك حديثاً فقد لا يكون قد ظهر بعد، حاول لاحقاً.</span></div>'; return; }
+    const sx = st(it.status);
+    res.innerHTML = '<div class="job-card"><h4>' + esc(it.job || '—') + '</h4>' +
+      '<div style="margin-top:10px">حالة الطلب: ' + tag(sx.color||'blue', sx.label) + '</div>' +
+      (it.createdAt ? '<div class="muted" style="font-size:12px;margin-top:6px">تاريخ التقديم: ' + fmtDT(it.createdAt) + '</div>' : '') +
+      (it.updatedAt ? '<div class="muted" style="font-size:12px;margin-top:4px">آخر تحديث للحالة: ' + fmtDT(it.updatedAt) + '</div>' : '') +
+    '</div>';
+  } catch(e){
+    res.innerHTML = '<div class="empty" style="padding:16px"><span>تعذّر البحث الآن، حاول لاحقاً</span></div>';
+  }
+}
+async function exportPublicTracking(){
+  const items = [];
+  const now = Date.now();
+  for(const c of (DATA.candidates || [])){
+    if(!c.trackCode || c.gdprDeleteRequested) continue;
+    const job = jobOf(c);
+    const base = {job: job ? job.title : '', status: c.status || 'received', createdAt: c.createdAt || null, updatedAt: now};
+    for(const contact of [c.email, c.phone]){
+      if(!contact) continue;
+      items.push(Object.assign({k: await trackHash(contact, c.trackCode)}, base));
+    }
+  }
+  const blob = new Blob([JSON.stringify(items, null, 2)], {type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = 'tracking.json'; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  openModal('نشر حالات الطلبات للمرشحين',
+    '<div class="alert success">' + ic('check',16) + '<div>تم تنزيل <b>tracking.json</b> ويحتوي ' + items.length + ' سجلاً. الملف لا يحتوي أسماء ولا بريداً ولا جوالاً، بل بصمات مشفّرة + المسمى الوظيفي + الحالة فقط.</div></div>' +
+    '<ol style="line-height:2;font-size:13px;padding-inline-start:20px"><li>افتح مستودع GitHub.</li><li>اضغط <b>Add file ← Upload files</b> وارفع <b>tracking.json</b> بجانب index.html (يستبدل القديم).</li><li>اضغط <b>Commit changes</b> وانتظر دقيقة.</li></ol>' +
+    '<p class="hint">كرّر هذه الخطوة كلما تغيّرت حالات الطلبات أو وصلت طلبات جديدة أدخلتها في النظام.</p>');
+}
 function renderPortalTrack(){
   removeJobPostingSchema();
   const box = $('portalBody');
@@ -3834,7 +3889,7 @@ function renderPortalTrack(){
     if(!contact || !code){ toast('⚠️ الرجاء إدخال البيانات وريمز التتبع'); return; }
     const cand = DATA.candidates.find(c => c.trackCode && c.trackCode.toUpperCase()===code && ((c.email && norm(c.email)===contact) || (c.phone && norm(c.phone)===contact)));
     const res = $('trkResult');
-    if(!cand){ res.innerHTML = '<div class="empty" style="padding:16px"><span>لم يُعثر على طلب مطابق للبيانات المُدخلة</span></div>'; return; }
+    if(!cand){ trackRemoteLookup(contact, code, res); return; }
     const job = jobOf(cand);
     const s = st(cand.status);
     res.innerHTML = '<div class="job-card"><h4>' + esc(job?job.title:'—') + '</h4>' +
