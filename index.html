@@ -41,6 +41,9 @@ button{font-family:inherit;cursor:pointer}
 input,select,textarea{font-family:inherit;font-size:14px}
 :focus-visible{outline:3px solid #7aa7d6;outline-offset:1px}
 .ic{display:inline-block;vertical-align:-3px;flex-shrink:0}
+.jd-details{margin-top:8px;font-size:12.5px}
+.jd-details>summary{cursor:pointer;color:var(--mute);font-weight:600;list-style:revert}
+.jd-details .jd-body{white-space:pre-wrap;word-break:break-word;max-height:180px;overflow:auto;margin-top:6px;padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:var(--soft);color:var(--mute);line-height:1.7}
 h1,h2,h3,h4{line-height:1.35}
 
 /* دخول */
@@ -1009,13 +1012,15 @@ function addTimeline(cand, type, text){
 }
 
 /* ═══════════════ محرك الفرز ═══════════════ */
+function jobMatchText(j){ return [j && j.jdText, j && j.description].filter(x => x && String(x).trim()).join('\n'); }
 function screen(job, cand){
   let failed = null;
+  const jdTxt = jobMatchText(job);
   const hasJdCrit = (job.criteria || []).some(cr => cr.type === 'jd_match');
-  const effCriteria = (job.description && job.description.trim() && !hasJdCrit) ?
+  const effCriteria = (jdTxt.trim() && !hasJdCrit) ?
     (job.criteria || []).concat([{type:'jd_match', required:0, weight:30, mandatory:false, auto:true}]) : (job.criteria || []);
   const rows = effCriteria.map(cr => {
-    let ratio = 0, detail = '', label = '';
+    let ratio = 0, detail = '', label = '', skip = false;
     if(cr.type === 'education'){
       const have = EDU.indexOf(cand.education), need = EDU.indexOf(cr.required);
       ratio = have >= 0 && have >= need ? 1 : (have >= 0 ? Math.max(0, 1 - (need-have)*0.34) : 0);
@@ -1044,15 +1049,15 @@ function screen(job, cand){
       detail = (hv ? fmtN(hv) : 'غير محدد') + ' مقابل حد أقصى ' + fmtN(cap);
     } else if(cr.type === 'jd_match'){
       label = 'مطابقة الوصف الوظيفي' + (cr.auto ? ' (تلقائي)' : '');
-      if(!job.description || !job.description.trim()){
-        ratio = 0; detail = 'لم يتم إدخال وصف وظيفي لهذا الشاغر';
+      if(!jdTxt.trim()){
+        ratio = 1; skip = true; detail = 'لا يوجد نص وصف وظيفي لهذا الشاغر — لم يُحتسب هذا المعيار';
       } else if(!cand.resumeText || !cand.resumeText.trim()){
-        ratio = 0; detail = 'لا يوجد نص سيرة ذاتية مستخرج لمطابقته مع الوصف الوظيفي';
+        ratio = 0.5; detail = 'لا يوجد نص سيرة ذاتية مستخرج — قيمة محايدة 50% ويلزم مراجعة يدوية';
       } else {
-        const m = jdMatch(job.description, cand.resumeText);
+        const m = jdMatch(jdTxt, cand.resumeText);
         const pct = Math.round(m.ratio * 100);
         const need = Number(cr.required) || 0;
-        ratio = need <= 0 ? m.ratio : (pct >= need ? 1 : m.ratio*100/need);
+        ratio = need <= 0 ? Math.min(1, m.ratio / 0.5) : (pct >= need ? 1 : m.ratio*100/need);
         detail = 'تطابق ' + pct + '% من الكلمات المفتاحية (' + m.matched.length + ' من ' + m.total + ')' +
           (m.matched.length ? ' — موجودة: ' + m.matched.slice(0,8).join('، ') : '') +
           (m.missing.length ? ' | ناقصة: ' + m.missing.slice(0,8).join('، ') : '');
@@ -1060,16 +1065,17 @@ function screen(job, cand){
     }
     const pass = ratio >= 1;
     if(cr.mandatory && !pass && !failed) failed = Object.assign({label}, cr);
-    return {cr, label, ratio, detail, pass};
+    return {cr, label, ratio, detail, pass, skip};
   });
-  const pref = rows.filter(r => !r.cr.mandatory);
+  const pref = rows.filter(r => !r.cr.mandatory && !r.skip);
   const totalW = sum(pref, r => r.cr.weight || 0) || 1;
-  const score = failed ? 0 : Math.round(sum(pref, r => r.ratio * (r.cr.weight || 0)) * (100 / totalW));
+  const score = failed ? 0 : (pref.length ? Math.round(sum(pref, r => r.ratio * (r.cr.weight || 0)) * (100 / totalW)) : 100);
   const th = job.thresholds || {pass:70, review:50};
   let verdict = 'screened_fail';
   if(!failed){
     if(score >= th.pass) verdict = 'screened_pass';
     else if(score >= th.review) verdict = 'screened_review';
+    else if(jdTxt.trim() && !(cand.resumeText && cand.resumeText.trim())) verdict = 'screened_review'; /* لا سيرة مقروءة: لا يُرفض آلياً بل يُراجع يدوياً */
   }
   return {score, rows, failed, verdict};
 }
@@ -1255,6 +1261,10 @@ function renderCandidates(view){
     '<div id="candBody"></div>' +
   '</div></div>';
 
+  if(canPurge() && DATA.candidates.length){
+    view.querySelector('.panel-head').insertAdjacentHTML('beforeend', '<button class="btn sm red" id="purgeCandsBtn" type="button">🧹 حذف جميع المرشحين</button>');
+    $('purgeCandsBtn').onclick = purgeAllCandidates;
+  }
   view.querySelectorAll('[data-view]').forEach(b => b.onclick = () => { UI.cand.view = b.dataset.view; renderCandidates(view); });
   $('cQ').oninput = debounce(e => { UI.cand.q = e.target.value; renderCandBody(); }, 200);
   $('cJob').onchange = e => { UI.cand.job = e.target.value; renderCandBody(); };
@@ -2516,6 +2526,32 @@ function finalizeNewCandidate(cand, actionLabel, ivDraft){
 }
 
 /* — استخراج نص من ملف — */
+function loadScriptOnce(src){
+  return new Promise((res, rej) => {
+    if(document.querySelector('script[data-lazy="' + src + '"]')) return res();
+    const sc = document.createElement('script'); sc.src = src; sc.dataset.lazy = src; sc.onload = () => res(); sc.onerror = () => rej(new Error('load ' + src));
+    document.head.appendChild(sc);
+  });
+}
+/* — التعرّف الضوئي على الحروف للسير الممسوحة ضوئياً (يُحمَّل عند الحاجة فقط ويحتاج إنترنت) — */
+async function ocrPdf(pdf, maxPages){
+  try {
+    toast('⏳ السيرة ممسوحة ضوئياً — جارٍ التعرّف على النص (قد يستغرق دقيقة)…');
+    if(!window.Tesseract) await loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.1/tesseract.min.js');
+    const worker = await window.Tesseract.createWorker('ara+eng');
+    let out = '';
+    for(let p = 1; p <= maxPages; p++){
+      const page = await pdf.getPage(p);
+      const vp = page.getViewport({scale: 2});
+      const cv = document.createElement('canvas'); cv.width = vp.width; cv.height = vp.height;
+      await page.render({canvasContext: cv.getContext('2d'), viewport: vp}).promise;
+      const r = await worker.recognize(cv);
+      out += (r && r.data && r.data.text ? r.data.text : '') + '\n';
+    }
+    await worker.terminate();
+    return out.trim();
+  } catch(e){ console.warn('OCR failed', e); return ''; }
+}
 async function extractText(file){
   const ext = file.name.toLowerCase().split('.').pop();
   const buf = await file.arrayBuffer();
@@ -2529,6 +2565,7 @@ async function extractText(file){
         const content = await page.getTextContent();
         out += content.items.map(x => x.str).join(' ') + '\n';
       }
+      if(out.replace(/\s+/g, '').length < 80){ const o2 = await ocrPdf(pdf, Math.min(pdf.numPages, 3)); if(o2) return o2; }
       return out;
     }
     if(ext === 'docx' && window.mammoth){
@@ -2799,11 +2836,12 @@ function showBulkUpload(){
 function renderJobs(view){
   const canManage = can('jobs') || can('all');
   view.innerHTML = '<div class="panel"><div class="panel-head"><h3>الشواغر (' + DATA.jobs.length + ')</h3>' +
-    (canManage ? '<button class="btn" id="pubJobsBtn" title="تنزيل jobs.json لرفعه على GitHub">🌐 نشر الشواغر للموقع</button> <button class="btn" id="pubTrackBtn" title="تنزيل tracking.json لرفعه على GitHub">📡 نشر حالات الطلبات</button> <button class="btn green" id="newJobBtn">' + ic('plus',15) + ' شاغر جديد</button>' : '') + '</div><div class="panel-body">' +
+    (canManage ? '<button class="btn" id="pubJobsBtn" title="تنزيل jobs.json لرفعه على GitHub">🌐 نشر الشواغر للموقع</button> <button class="btn" id="pubTrackBtn" title="تنزيل tracking.json لرفعه على GitHub">📡 نشر حالات الطلبات</button> ' + (canPurge() && (DATA.jobs.length || DATA.candidates.length) ? '<button class="btn red" id="purgeAllBtn" title="حذف جميع الشواغر والطلبات والمقابلات">🧹 تنظيف البيانات</button> ' : '') + '<button class="btn green" id="newJobBtn">' + ic('plus',15) + ' شاغر جديد</button>' : '') + '</div><div class="panel-body">' +
     (DATA.jobs.length ? DATA.jobs.slice().sort((a,b)=>b.createdAt-a.createdAt).map(j => jobCardHtml(j, canManage)).join('') :
       '<div class="empty">' + ic('briefcase',32) + '<strong>لا توجد شواغر بعد</strong><span>ابدأ بإنشاء أول شاغر لبدء استقبال الطلبات</span></div>') +
     '</div></div>';
   const nb = $('newJobBtn'); if(nb) nb.onclick = () => showJobForm();
+  const purgeB = $('purgeAllBtn'); if(purgeB) purgeB.onclick = purgeRecruitmentData;
   const pb = $('pubJobsBtn'); if(pb) pb.onclick = exportPublicJobs; const ptb = $('pubTrackBtn'); if(ptb) ptb.onclick = exportPublicTracking;
   view.querySelectorAll('[data-togglejob]').forEach(b => b.onclick = () => toggleJob(b.dataset.togglejob));
   view.querySelectorAll('[data-editjob]').forEach(b => b.onclick = () => showJobForm(byId(DATA.jobs, b.dataset.editjob)));
@@ -2813,6 +2851,58 @@ function renderJobs(view){
   view.querySelectorAll('[data-copyjoblink]').forEach(b => b.onclick = () => { const j = byId(DATA.jobs, b.dataset.copyjoblink); openShareLinkModal(publicJobLink(b.dataset.copyjoblink), j ? j.title : ''); });
   view.querySelectorAll('[data-linkedinjob]').forEach(b => b.onclick = () => shareOnLinkedIn(b.dataset.linkedinjob));
   view.querySelectorAll('[data-adjob]').forEach(b => b.onclick = () => openAdGenerator(b.dataset.adjob));
+}
+function canPurge(){ return can('everything') || can('users'); }
+async function wipeCandidateFiles(){
+  try { for(const k of await FILES.keys()){ if(String(k).indexOf('jd_') !== 0) await FILES.del(k); } } catch(e){}
+}
+function purgeAllCandidates(){
+  if(!canPurge()){ toast('⚠️ هذا الإجراء لمدير النظام أو الموارد البشرية فقط'); return; }
+  const nC = DATA.candidates.length, nI = (DATA.interviews || []).length;
+  const bg = openModal('حذف جميع المرشحين',
+    '<div class="alert danger">' + ic('alert',15) + ' <div>سيتم حذف <b>' + nC + '</b> مرشح (بما فيهم المؤرشفون وبنك المواهب) و<b>' + nI + '</b> مقابلة مع التقييمات والسير الذاتية. <b>تبقى الشواغر كما هي.</b> لا يمكن التراجع.</div></div>' +
+    '<div class="field"><label>للتأكيد اكتب كلمة <b>حذف</b></label><input id="pcConfirm" autocomplete="off"></div>' +
+    '<div class="modal-foot"><button class="btn red solid" id="pcGo" disabled>🧹 حذف المرشحين</button><button class="btn" id="pcNo">إلغاء</button></div>', {size:'sm'});
+  const inp = bg.querySelector('#pcConfirm'), go = bg.querySelector('#pcGo');
+  inp.oninput = () => { go.disabled = inp.value.trim() !== 'حذف'; };
+  bg.querySelector('#pcNo').onclick = () => closeModal(bg);
+  go.onclick = async () => {
+    if(inp.value.trim() !== 'حذف') return;
+    DATA.candidates = []; DATA.interviews = []; DATA.evaluations = [];
+    DATA.interviewSlots = []; DATA.referralBonuses = []; DATA.mentions = [];
+    await wipeCandidateFiles();
+    logAction('حذف جميع المرشحين', 'system', '-', nC + ' مرشح، ' + nI + ' مقابلة');
+    saveData(); closeModal(bg); toast('✅ تم حذف جميع المرشحين'); render();
+  };
+}
+/* — تنظيف شامل: حذف كل الشواغر والطلبات وما يرتبط بها (مدير النظام فقط). يُبقي المستخدمين وبنك الجدارات والإعدادات — */
+function purgeRecruitmentData(){
+  if(!canPurge()){ toast('⚠️ هذا الإجراء لمدير النظام أو الموارد البشرية فقط'); return; }
+  const nJ = DATA.jobs.length, nC = DATA.candidates.length, nI = (DATA.interviews || []).length;
+  const bg = openModal('تنظيف البيانات',
+    '<div class="alert danger">' + ic('alert',15) + ' <div>سيتم حذف نهائي لـ <b>' + nJ + '</b> شاغر و<b>' + nC + '</b> طلب/مرشح و<b>' + nI + '</b> مقابلة، مع التقييمات والمرفقات (السير الذاتية وملفات الوصف). لا يمكن التراجع.</div></div>' +
+    '<p class="hint" style="margin-bottom:8px">لن يُحذف: المستخدمون وكلمات المرور، بنك الجدارات وبنك الأسئلة، قوالب الرسائل، الإعدادات. ننصح بتنزيل نسخة احتياطية أولاً من قائمة الأدوات.</p>' +
+    '<div class="field"><label>للتأكيد اكتب كلمة <b>حذف</b></label><input id="purgeConfirm" autocomplete="off"></div>' +
+    '<div class="modal-foot"><button class="btn red solid" id="purgeGo" disabled>🧹 حذف نهائي</button><button class="btn" id="purgeNo">إلغاء</button></div>', {size:'sm'});
+  const inp = bg.querySelector('#purgeConfirm'), go = bg.querySelector('#purgeGo');
+  inp.oninput = () => { go.disabled = inp.value.trim() !== 'حذف'; };
+  bg.querySelector('#purgeNo').onclick = () => closeModal(bg);
+  go.onclick = async () => {
+    if(inp.value.trim() !== 'حذف') return;
+    DATA.jobs = [];
+    DATA.candidates = [];
+    DATA.interviews = [];
+    DATA.evaluations = [];
+    DATA.interviewSlots = [];
+    DATA.referralBonuses = [];
+    DATA.mentions = [];
+    try { await FILES.clear(); } catch(e){}
+    window.PUBLIC_JOBS = [];
+    logAction('تنظيف البيانات', 'system', '-', nJ + ' شاغر، ' + nC + ' طلب، ' + nI + ' مقابلة');
+    saveData(); closeModal(bg);
+    toast('✅ تم حذف جميع الشواغر والطلبات');
+    render();
+  };
 }
 async function downloadJdFile(id){
   const j = byId(DATA.jobs, id); if(!j || !j.jdFileName) return;
@@ -2830,7 +2920,7 @@ function jobCardHtml(j, canManage){
   ];
   const fillPct = j.openings ? Math.min(100, Math.round((hired / j.openings) * 100)) : 0;
   return '<div class="job-card"><div class="hd">' +
-    '<div><h4>' + esc(j.title) + '</h4><div class="muted" style="font-size:12px;margin-top:3px">' + esc(j.dept||'—') + ' · ' + esc(j.location||'—') + ' · ' + j.criteria.length + ' معيار فرز' + ((j.description && j.description.trim() && !j.criteria.some(c=>c.type==='jd_match')) ? ' + مطابقة تلقائية مع الوصف الوظيفي' : '') +
+    '<div><h4>' + esc(j.title) + '</h4><div class="muted" style="font-size:12px;margin-top:3px">' + esc(j.dept||'—') + ' · ' + esc(j.location||'—') + ' · ' + j.criteria.length + ' معيار فرز' + ((jobMatchText(j).trim() && !j.criteria.some(c=>c.type==='jd_match')) ? ' + مطابقة تلقائية مع الوصف الوظيفي' : '') +
       ' · نموذج مقابلة: ' + ((j.evalTemplate?j.evalTemplate.compIds.length:0)) + ' جدارة، ' + ((j.evalTemplate?j.evalTemplate.questions.filter(q=>(q.axis||'tech')==='tech').length:0)) + ' سؤال فني، ' + ((j.evalTemplate?j.evalTemplate.questions.filter(q=>q.axis==='beh').length:0)) + ' سؤال سلوكي</div></div>' +
     '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">' + tag(j.status==='open'?'green':'gray', j.status==='open'?'مفتوح':'مغلق') +
       (canManage ? '<div style="display:flex;gap:6px">' +
@@ -2838,8 +2928,8 @@ function jobCardHtml(j, canManage){
         '<button class="btn sm" data-togglejob="' + j.id + '">' + (j.status==='open'?'إغلاق':'فتح') + '</button>' +
         '<button class="btn sm red" data-deljob="' + j.id + '">' + ic('trash',13) + '</button></div>' : '') +
     '</div></div>' +
-    (j.description ? '<p class="muted" style="font-size:12.5px;margin-top:8px">' + esc(j.description) + '</p>' : '') +
-    (j.jdFileName ? '<button class="btn sm ghost" data-dljd="' + j.id + '" style="margin-top:4px;padding:2px 0">' + ic('file',12) + ' ' + esc(j.jdFileName) + ' — تنزيل الملف المرفق</button>' : '') +
+    (j.jdFileName ? '<div style="margin-top:8px"><button class="btn sm" data-dljd="' + j.id + '" style="padding:4px 10px">' + ic('file',13) + ' الوصف الوظيفي (مرفق): ' + esc(j.jdFileName) + ' — تنزيل</button></div>' : '') +
+    ((j.description && j.description.trim()) ? '<details class="jd-details"><summary>' + (j.jdFileName ? 'ملخص الوصف' : 'عرض الوصف الوظيفي') + '</summary><div class="jd-body">' + esc(j.description) + '</div></details>' : '') +
     ((j.salaryRange&&(j.salaryRange.min||j.salaryRange.max)) ? '<div class="muted" style="font-size:11.5px;margin-top:4px">نطاق الراتب المعياري: ' + fmtN(j.salaryRange.min) + ' — ' + fmtN(j.salaryRange.max) + ' ر.س' + (j.requireApproval?' · يتطلب سير موافقات قبل التعيين':'') + '</div>' : (j.requireApproval ? '<div class="muted" style="font-size:11.5px;margin-top:4px">يتطلب سير موافقات قبل التعيين</div>' : '')) +
     '<div class="pipe">' + stages.map(s => '<div><b>' + apps.filter(c=>c.status===s.k || (s.k==='screened_pass' && ['screened_pass'].includes(c.status))).length + '</b>' + s.l + '</div>').join('') +
       '<div><b>' + apps.length + '</b>الإجمالي</div></div>' +
@@ -2862,12 +2952,25 @@ function toggleJob(id){
 function deleteJob(id){
   const j = byId(DATA.jobs, id);
   const apps = DATA.candidates.filter(c => c.jobId === id).length;
-  askConfirm('حذف شاغر «' + (j?j.title:'') + '»؟' + (apps ? ' يوجد ' + apps + ' مرشح مرتبط به وسيبقون بلا شاغر.' : ''), () => {
+  const bg = openModal('حذف شاغر',
+    '<p style="margin-bottom:10px">حذف شاغر «' + esc(j?j.title:'') + '»؟</p>' +
+    (apps ? '<div class="field check"><input type="checkbox" id="djCands" checked><label for="djCands" style="margin:0">حذف المرشحين المرتبطين بهذا الشاغر أيضاً (' + apps + ') مع مقابلاتهم وسيرهم الذاتية</label></div>' : '') +
+    '<div class="modal-foot"><button class="btn red solid" id="djGo">حذف</button><button class="btn" id="djNo">إلغاء</button></div>', {size:'sm'});
+  bg.querySelector('#djNo').onclick = () => closeModal(bg);
+  bg.querySelector('#djGo').onclick = async () => {
+    const withCands = !!(bg.querySelector('#djCands') && bg.querySelector('#djCands').checked);
+    if(withCands){
+      const ids = new Set(DATA.candidates.filter(c => c.jobId === id).map(c => c.id));
+      DATA.candidates = DATA.candidates.filter(c => !ids.has(c.id));
+      DATA.interviews = (DATA.interviews || []).filter(iv => !ids.has(iv.candId));
+      DATA.evaluations = (DATA.evaluations || []).filter(ev => !ids.has(ev.candId));
+      for(const cid of ids){ try { await FILES.del('cv_' + cid); } catch(e){} }
+    }
     DATA.jobs = DATA.jobs.filter(x => x.id !== id);
     FILES.del('jd_' + id);
-    logAction('حذف شاغر', 'job', id, j ? j.title : '');
-    saveData(); toast('تم حذف الشاغر'); render();
-  }, {danger:true, yes:'حذف'});
+    logAction('حذف شاغر', 'job', id, (j ? j.title : '') + (withCands ? ' (مع المرشحين)' : ''));
+    saveData(); closeModal(bg); toast('تم حذف الشاغر' + (withCands ? ' والمرشحين المرتبطين به' : '')); render();
+  };
 }
 
 /* — نموذج الشاغر — */
@@ -2890,8 +2993,8 @@ function showJobForm(job){
     '<p class="hint" style="margin:-8px 0 10px">عند تحديد النطاق، سيظهر تنبيه تلقائي إذا كان الراتب المتوقع للمرشح أو الراتب المعروض خارج هذا النطاق.</p>' +
     '<div class="field"><label>مدير الشاغر (يرى مرشحي هذا الشاغر فقط ويقيّمهم)</label><select id="jMgr"><option value="">— بدون —</option>' + (DATA.users||[]).filter(u => u.role === 'مدير شاغر').map(u => '<option value="' + esc(u.username) + '"' + (job && job.managerUser === u.username ? ' selected' : '') + '>' + esc(u.name) + '</option>').join('') + '</select></div>' +
     '<div class="field check"><input type="checkbox" id="jReqApproval" ' + (job&&job.requireApproval?'checked':'') + '><label for="jReqApproval" style="margin:0">تفعيل سير موافقات (مدير ثم مالية) قبل تأكيد تعيين أي مرشح لهذه الوظيفة</label></div>' +
-    '<div class="field"><label>الوصف الوظيفي</label><textarea id="jDesc" rows="4">' + esc(job?job.description:'') + '</textarea>' +
-      '<div class="hint">يمكنك كتابة الوصف مباشرة، أو إرفاق ملف وسيُستخرج نصه ويُضاف هنا تلقائياً.</div></div>' +
+    '<div class="field"><label>الوصف الوظيفي — ملخص اختياري</label><textarea id="jDesc" rows="3">' + esc(job?job.description:'') + '</textarea>' +
+      '<div class="hint">الأفضل إرفاق ملف الوصف الوظيفي أدناه؛ يُحفظ كمرفق ولا يُعرض كاملاً، ويُستخدم نصه داخلياً للفرز الآلي. يمكنك هنا كتابة ملخص قصير يظهر مطوياً في بطاقة الشاغر.</div></div>' +
     '<div class="field"><div class="drop-zone" id="jdDropZone" tabindex="0" role="button" aria-label="رفع ملف الوصف الوظيفي" style="padding:14px">' +
       '<div class="icon">' + ic('upload',24) + '</div><div class="text" style="font-size:12.5px">اسحب ملف الوصف الوظيفي هنا أو اضغط للاختيار</div>' +
       '<div class="hint">PDF · Word (.docx) · TXT — 5MB كحد أقصى</div></div>' +
@@ -2923,18 +3026,20 @@ function showJobForm(job){
     '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px"><button class="btn sm" id="qbPick" type="button">📚 من بنك الأسئلة</button><button class="btn sm" id="qbSave" type="button">💾 حفظ الأسئلة الحالية في البنك</button></div>' +
     '<div class="modal-foot"><button class="btn green" id="saveJobBtn">' + ic('check',15) + ' حفظ الشاغر</button><button class="btn" id="cancelJobBtn">إلغاء</button></div>',
   {size:'md'});
-  window._newCriteria = job ? JSON.parse(JSON.stringify(job.criteria)) : [{type:'experience', required:3, weight:50, mandatory:true}, {type:'jd_match', required:0, weight:50, mandatory:false}];
+  window._newCriteria = job ? JSON.parse(JSON.stringify(job.criteria)) : [{type:'experience', required:3, weight:50, mandatory:false}, {type:'jd_match', required:0, weight:50, mandatory:false}];
   renderCriteria();
   window._pendingJdFile = null;
   window._pendingJdFileName = null;
+  window._pendingJdText = null;
   window._removeJdFile = false;
   renderJdFileInfo();
   function renderJdFileInfo(){
     const box = bg.querySelector('#jdFileInfo'); if(!box) return;
     const name = window._pendingJdFileName || (job && !window._removeJdFile ? job.jdFileName : null);
-    box.innerHTML = name ? ('<span class="tag blue">' + ic('file',12) + ' ' + esc(name) + '</span> <button type="button" class="btn sm ghost" id="jdFileRemove" style="padding:2px 8px">' + ic('x',12) + ' إزالة</button>') : '';
+    const wc = window._pendingJdText ? window._pendingJdText.trim().split(/\s+/).length : 0;
+    box.innerHTML = name ? ('<span class="tag blue">' + ic('file',12) + ' ' + esc(name) + '</span>' + (window._pendingJdFileName ? ' <span class="muted" style="font-size:11.5px">' + (wc ? 'تم استخراج ' + wc + ' كلمة للمطابقة الآلية' : 'تعذّر استخراج نص — لن تعمل المطابقة الآلية مع الوصف') + '</span>' : '') + ' <button type="button" class="btn sm ghost" id="jdFileRemove" style="padding:2px 8px">' + ic('x',12) + ' إزالة</button>') : '';
     const rm = box.querySelector('#jdFileRemove');
-    if(rm) rm.onclick = () => { window._pendingJdFile = null; window._pendingJdFileName = null; window._removeJdFile = true; renderJdFileInfo(); };
+    if(rm) rm.onclick = () => { window._pendingJdFile = null; window._pendingJdFileName = null; window._pendingJdText = ''; window._removeJdFile = true; renderJdFileInfo(); };
   }
   async function handleJdFile(file){
     const ext = file.name.toLowerCase().split('.').pop();
@@ -2942,13 +3047,12 @@ function showJobForm(job){
     if(file.size > 5*1024*1024){ toast('⚠️ حجم الملف أكبر من 5MB'); return; }
     toast('⏳ يجري استخراج نص الوصف الوظيفي…');
     const text = await extractText(file);
-    const ta = bg.querySelector('#jDesc');
-    if(ta) ta.value = ta.value.trim() ? (ta.value.trim() + '\n\n' + (text||'').trim()) : (text||'').trim();
     window._pendingJdFile = file;
     window._pendingJdFileName = file.name;
+    window._pendingJdText = (text||'').trim();
     window._removeJdFile = false;
     renderJdFileInfo();
-    toast(text && text.trim() ? '✅ تم استخراج النص وإضافته إلى الوصف الوظيفي' : '⚠️ تعذّر استخراج نص من الملف — يمكنك إكمال الوصف يدوياً');
+    toast(text && text.trim() ? '✅ تم إرفاق الملف واستخراج نصه للفرز الآلي' : '⚠️ تم إرفاق الملف لكن تعذّر استخراج نصه — اكتب ملخصاً في خانة الوصف ليعمل الفرز الآلي');
   }
   const jdz = bg.querySelector('#jdDropZone'), jfi = bg.querySelector('#jdFileInput');
   jdz.onclick = () => jfi.click();
@@ -3015,7 +3119,7 @@ function showJobForm(job){
   renderEvComps();
   renderEvQuestions();
   bg.querySelector('#aiGenQBtn').onclick = async () => {
-    const title = $('jTitle').value.trim(), desc = $('jDesc').value.trim();
+    const title = $('jTitle').value.trim(), desc = ($('jDesc').value.trim() + '\n' + (window._pendingJdText != null ? window._pendingJdText : ((job && !window._removeJdFile && job.jdText) || ''))).trim();
     if(!title){ toast('⚠️ أدخل المسمى الوظيفي أولاً'); return; }
     if(!desc){ toast('⚠️ أضف الوصف الوظيفي أولاً ليبني عليه الذكاء الاصطناعي الأسئلة'); return; }
     const room = EVAL_Q_CAP - window._evalQuestions.length;
@@ -3075,7 +3179,7 @@ function renderCriteria(){
 async function saveJob(existing, bg){
   const title = $('jTitle').value.trim();
   if(!title){ toast('⚠️ أدخل المسمى الوظيفي'); return; }
-  if(!window._newCriteria.length && !$('jDesc').value.trim()){ toast('⚠️ أضف معياراً واحداً على الأقل، أو أدخل وصفاً وظيفياً ليُستخدم في الفرز التلقائي'); return; }
+  if(!window._newCriteria.length && !$('jDesc').value.trim() && !(window._pendingJdText && window._pendingJdText.trim())){ toast('⚠️ أضف معياراً واحداً على الأقل، أو أدخل وصفاً وظيفياً ليُستخدم في الفرز التلقائي'); return; }
   const bad = window._newCriteria.find(cr => cr.type === 'skill' && !cr.skill);
   if(bad){ toast('⚠️ أدخل اسم المهارة لكل معيار مهارة'); return; }
   const data = {
@@ -3086,6 +3190,7 @@ async function saveJob(existing, bg){
     requireApproval: !!$('jReqApproval').checked,
     managerUser: ($('jMgr') ? $('jMgr').value : ''),
     description: $('jDesc').value.trim(),
+    jdText: window._pendingJdText != null ? window._pendingJdText : (existing && !window._removeJdFile ? (existing.jdText || '') : ''),
     jdFileName: window._pendingJdFileName || (existing && !window._removeJdFile ? existing.jdFileName : undefined),
     criteria: window._newCriteria.map(cr => JSON.parse(JSON.stringify(cr))),
     evalTemplate: {
@@ -3560,16 +3665,21 @@ function switchUser(){
 const AI_PROVIDER_STORE = 'rhms_ai_provider';
 const AI_PROVIDERS = {
   gemini:    {label:'Google Gemini (مجاني للتجربة)', keyStore:'rhms_ai_key_gemini', modelStore:'rhms_ai_model_gemini', defModel:'gemini-flash-latest'},
-  anthropic: {label:'Anthropic Claude (مدفوع)',       keyStore:'rhms_ai_key',        modelStore:'rhms_ai_model',        defModel:'claude-sonnet-5'}
+  anthropic: {label:'Anthropic Claude (مدفوع)',       keyStore:'rhms_ai_key',        modelStore:'rhms_ai_model',        defModel:'claude-sonnet-5-5'}
 };
 const AI_COMPANY = 'الصناعية القابضة (شركة فلسطين للاستثمار الصناعي)';
 function aiLs(k){ try { return localStorage.getItem(k) || ''; } catch(e){ return ''; } }
 function aiProvider(){ const v = aiLs(AI_PROVIDER_STORE); return AI_PROVIDERS[v] ? v : 'gemini'; }
 function aiGetKey(prov){ return aiLs(AI_PROVIDERS[prov || aiProvider()].keyStore); }
-function aiGetModel(prov){ const P = AI_PROVIDERS[prov || aiProvider()]; return aiLs(P.modelStore) || P.defModel; }
+const AI_BAD_MODELS = ['claude-sonnet-5','claude-sonnet-5-0','gemini-flash','gemini-pro','claude-sonnet'];
+function aiGetModel(prov){ const P = AI_PROVIDERS[prov || aiProvider()]; const m = aiLs(P.modelStore); return (!m || AI_BAD_MODELS.indexOf(m) >= 0) ? P.defModel : m; }
+function aiCleanKey(k){ return String(k || '').replace(/[\s"'`]+/g, ''); }
+function aiGuessProvider(k){ if(/^sk-ant-/i.test(k)) return 'anthropic'; if(/^AIza/.test(k)) return 'gemini'; return null; }
 async function aiCall(system, user, maxTokens){
-  const prov = aiProvider(), key = aiGetKey(prov);
+  const prov = aiProvider(), key = aiCleanKey(aiGetKey(prov));
   if(!key) throw new Error('NO_KEY');
+  if(/[^\x20-\x7E]/.test(key)) throw new Error('BAD_KEY_CHARS');
+  const _hint = aiGuessProvider(key); if(_hint && _hint !== prov) throw new Error('WRONG_PROVIDER:' + _hint);
   let resp, data = null;
   if(prov === 'gemini'){
     resp = await fetch('https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(aiGetModel(prov)) + ':generateContent', {
@@ -3608,11 +3718,23 @@ function aiEnsureKey(){
   if(typeof can === 'function' && (can('users') || can('all'))) openAiSettings();
   return false;
 }
+function aiErrorText(e){
+  const m = (e && e.message) ? e.message : String(e);
+  if(m === 'NO_KEY') return 'لم يُضبط مفتاح الذكاء الاصطناعي';
+  if(m === 'BAD_KEY_CHARS') return 'المفتاح يحتوي رموزاً غير صالحة (عربية أو مخفية). احذفه وانسخه من جديد من موقع المزوّد.';
+  if(m.indexOf('WRONG_PROVIDER:') === 0){ const w = m.split(':')[1]; return 'المفتاح المحفوظ من مزوّد مختلف عن المزوّد المختار. اختر «' + AI_PROVIDERS[w].label + '» في إعدادات الذكاء الاصطناعي.'; }
+  if(/api key not valid|API_KEY_INVALID|invalid x-api-key|authentication_error|invalid api key|HTTP 401/i.test(m)) return 'المفتاح غير صحيح أو منتهٍ — أنشئ مفتاحاً جديداً وانسخه كاملاً. (' + m.slice(0,120) + ')';
+  if(/permission|HTTP 403|forbidden|not available in your country|location is not supported/i.test(m)) return 'المفتاح لا يملك صلاحية أو الخدمة غير متاحة في منطقتك/حسابك. (' + m.slice(0,140) + ')';
+  if(/credit balance|billing|insufficient|quota|exceeded|resource_exhausted|HTTP 429|rate.?limit/i.test(m)) return 'انتهى الرصيد أو الحصة المسموحة، أو الطلبات كثيرة. انتظر دقيقة أو اشحن الرصيد/فعّل الفوترة. (' + m.slice(0,140) + ')';
+  if(/not found|HTTP 404|model/i.test(m)) return 'اسم النموذج غير صحيح أو غير متاح لمفتاحك. افتح إعدادات الذكاء الاصطناعي وامسح خانة «النموذج» ليُستخدم الافتراضي. (' + m.slice(0,140) + ')';
+  if(/failed to fetch|networkerror|load failed/i.test(m)) return 'تعذّر الاتصال بخدمة الذكاء الاصطناعي — تحقق من الإنترنت' + (location.protocol === 'file:' ? ' وافتح النظام من رابط مستضاف بدل الملف المحلي' : '') + '، وتأكد أن مانع الإعلانات/VPN لا يحجب الاتصال.';
+  return 'خطأ من خدمة الذكاء الاصطناعي: ' + m.slice(0,200);
+}
 function aiErrorToast(e){
   const m = (e && e.message) ? e.message : String(e);
+  console.warn('AI error:', e);
   if(m === 'NO_KEY') toast('⚠️ لم يُضبط مفتاح الذكاء الاصطناعي');
-  else if(/failed to fetch|networkerror|load failed/i.test(m)) toast('⚠️ تعذّر الاتصال بخدمة الذكاء الاصطناعي — تحقق من الإنترنت' + (location.protocol === 'file:' ? ' وافتح النظام من رابط مستضاف بدل الملف المحلي' : ''));
-  else toast('⚠️ خطأ من خدمة الذكاء الاصطناعي: ' + m);
+  else toast('⚠️ ' + aiErrorText(e));
 }
 function aiParseJsonArray(text){
   const t = text.replace(/```json|```/g, '');
@@ -3649,10 +3771,15 @@ function openAiSettings(){
     bg.querySelector('#aiRemove').style.display = has ? '' : 'none';
   };
   bg.querySelector('#aiProv').onchange = fill; fill();
+  bg.querySelector('#aiModel').oninput = function(){ this.dataset.touched = '1'; };
   const save = () => {
-    const pv = bg.querySelector('#aiProv').value, P = AI_PROVIDERS[pv];
-    const k = bg.querySelector('#aiKey').value.trim();
-    const m = bg.querySelector('#aiModel').value.trim() || P.defModel;
+    let pv = bg.querySelector('#aiProv').value;
+    const k = aiCleanKey(bg.querySelector('#aiKey').value);
+    const g = k ? aiGuessProvider(k) : null;
+    if(g && g !== pv){ pv = g; bg.querySelector('#aiProv').value = g; toast('ℹ️ تم اختيار المزوّد «' + AI_PROVIDERS[g].label + '» تلقائياً حسب نوع المفتاح'); }
+    const P = AI_PROVIDERS[pv];
+    let m = (g && g !== bg.querySelector('#aiProv').dataset.last && !bg.querySelector('#aiModel').dataset.touched) ? P.defModel : bg.querySelector('#aiModel').value.trim();
+    if(!m || AI_BAD_MODELS.indexOf(m) >= 0 || (pv === 'anthropic' && !/^claude/i.test(m)) || (pv === 'gemini' && !/^gemini/i.test(m))) m = P.defModel;
     try { localStorage.setItem(AI_PROVIDER_STORE, pv); if(k) localStorage.setItem(P.keyStore, k); localStorage.setItem(P.modelStore, m); } catch(e){}
   };
   bg.querySelector('#aiCancel').onclick = () => closeModal(bg);
@@ -3663,7 +3790,11 @@ function openAiSettings(){
     if(!aiGetKey()){ toast('⚠️ أدخل مفتاح API أولاً'); return; }
     toast('⏳ جارٍ اختبار الاتصال…');
     try { await aiCall('أجب بكلمة واحدة فقط.', 'قل: جاهز', 20); toast('✅ الاتصال بالذكاء الاصطناعي يعمل بنجاح'); }
-    catch(e){ aiErrorToast(e); }
+    catch(e){
+      aiErrorToast(e);
+      const box = bg.querySelector('#aiHelp');
+      box.style.color = 'var(--red)'; box.textContent = '❌ ' + aiErrorText(e);
+    }
   };
 }
 /* — توليد أسئلة المقابلة من الوصف الوظيفي — */
@@ -3737,7 +3868,7 @@ function openAdGenerator(jobId){
       'عدد الشواغر: ' + (j.openings || 1) + '\n' +
       (exp && exp.required ? 'الخبرة: ' + exp.required + ' سنوات\n' : '') + (edu && edu.required ? 'المؤهل: ' + edu.required + '\n' : '') +
       (skills ? 'المهارات: ' + skills + '\n' : '') + sal +
-      'الوصف الوظيفي:\n' + (j.description || '(غير متوفر — اعتمد على المسمى فقط دون اختلاق تفاصيل)') + '\n\n' +
+      'الوصف الوظيفي:\n' + (jobMatchText(j).slice(0, 3000) || '(غير متوفر — اعتمد على المسمى فقط دون اختلاق تفاصيل)') + '\n\n' +
       platRules[plat] + ' ' + langRule + ' ' + toneRule;
     btn.disabled = true; const old = btn.textContent; btn.textContent = '⏳ جارٍ التوليد…';
     try {
@@ -4020,10 +4151,32 @@ async function loadPublicJobs(){
     const arr = await r.json();
     if(Array.isArray(arr)) window.PUBLIC_JOBS = arr.filter(j => j && j.id && j.title).map(j => Object.assign({status:'open', criteria:[]}, j));
   } catch(e){}
+  try {
+    const r2 = await fetch('portal-config.json?ts=' + Date.now(), {cache:'no-store'});
+    if(r2.ok){ const c2 = await r2.json(); if(c2 && c2.url && c2.key) window.PUBLIC_CFG = {url: String(c2.url), key: String(c2.key)}; }
+  } catch(e){}
+}
+/* — صندوق الطلبات السحابي: يُرسل الطلب إلى Supabase (إدراج فقط) ليجلبه الموظف لاحقاً — */
+function inboxCfg(){
+  let l = {}; try { l = JSON.parse(localStorage.getItem('rhms_cloud') || '{}') || {}; } catch(e){}
+  const p = window.PUBLIC_CFG || {};
+  return {url: String(l.url || p.url || '').replace(/\/+$/, ''), key: l.key || p.key || ''};
+}
+async function inboxSend(cand, file){
+  const c = inboxCfg(); if(!c.url || !c.key) return false;
+  try {
+    const payload = {cand: cand};
+    if(file && file.size && file.size <= 1500000){ payload.cv = {name: file.name, type: file.type || '', b64: await blobToDataURL(file)}; }
+    const r = await fetch(c.url + '/rest/v1/rhms_applications', {method: 'POST',
+      headers: {apikey: c.key, Authorization: 'Bearer ' + c.key, 'Content-Type': 'application/json', Prefer: 'return=minimal'},
+      body: JSON.stringify({id: cand.id, job_id: cand.jobId, payload: payload, imported: false})});
+    if(!r.ok) console.warn('inbox send HTTP', r.status);
+    return r.ok;
+  } catch(e){ console.warn('inbox send', e); return false; }
 }
 function exportPublicJobs(){
   const open = (DATA.jobs || []).filter(j => j.status === 'open');
-  const out = open.map(j => ({id:j.id, title:j.title, dept:j.dept||'', location:j.location||'', description:j.description||'', openings:j.openings||1, createdAt:j.createdAt||Date.now(), status:'open'}));
+  const out = open.map(j => ({id:j.id, title:j.title, dept:j.dept||'', location:j.location||'', description:j.description||(j.jdText||'').slice(0,1500), openings:j.openings||1, createdAt:j.createdAt||Date.now(), status:'open'}));
   const blob = new Blob([JSON.stringify(out, null, 2)], {type:'application/json'});
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a'); a.href = url; a.download = 'jobs.json'; document.body.appendChild(a); a.click(); a.remove();
@@ -4055,7 +4208,7 @@ function renderPortalApplyForm(box, job){
     '<button class="btn ghost sm" id="portalAllJobs" style="margin-bottom:10px">◂ كل الشواغر</button>' +
     '<div class="job-card"><h4>' + esc(job.title) + '</h4>' +
     '<div class="muted" style="font-size:12.5px;margin-top:3px">' + esc(job.dept||'—') + ' · ' + esc(job.location||'—') + '</div>' +
-    (job.description ? '<p style="font-size:13px;margin-top:10px;white-space:pre-wrap">' + esc(job.description) + '</p>' : '') + '</div>' +
+    (job.description ? '<div style="font-size:13px;margin-top:10px;white-space:pre-wrap;word-break:break-word;max-height:260px;overflow:auto;line-height:1.7">' + esc(job.description) + '</div>' : '') + '</div>' +
     '<div class="sec-title">نموذج التقديم</div>' +
     '<div class="field"><label>الاسم الكامل *</label><input id="pName"></div>' +
     '<div class="grid-2">' +
@@ -4066,6 +4219,9 @@ function renderPortalApplyForm(box, job){
       '<div class="field"><label>الموقع الحالي</label><input id="pLocation"></div>' +
       '<div class="field"><label>رابط الملف الشخصي في LinkedIn</label><input id="pLinkedin" placeholder="https://www.linkedin.com/in/..."></div>' +
       '<div class="field"><label>هل رشّحك أحد موظفينا؟ (اختياري)</label><input id="pReferral" placeholder="اسم الموظف المُرشِّح"></div>' +
+    '<div class="field"><label>الراتب الشهري المتوقع (اختياري)</label><input id="pSalary" type="number" min="0" placeholder="مثال: 5000"></div>' +
+    '<div class="field"><label>هل تقبل الانتقال إلى موقع العمل؟</label><select id="pRelocate"><option value="">— اختر —</option><option value="yes">نعم</option><option value="no">لا</option></select></div>' +
+    '<div class="field"><label>الجاهزية للمباشرة</label><select id="pNotice"><option value="">— اختر —</option><option>فوراً</option><option>خلال أسبوعين</option><option>خلال شهر</option><option>أكثر من شهر</option></select></div>' +
     '</div>' +
     '<div class="drop-zone" id="pDropZone" tabindex="0" role="button" aria-label="رفع السيرة الذاتية"><div class="icon">' + ic('upload',32) + '</div>' +
       '<div class="text">أرفق سيرتك الذاتية (اختياري)</div><div class="hint">PDF · Word (.docx) · TXT — 5MB كحد أقصى</div></div>' +
@@ -4101,7 +4257,8 @@ async function submitPortalApply(job){
     education: $('pEdu').value, years: Number($('pYears').value) || 0,
     location: $('pLocation').value.trim(), linkedin: $('pLinkedin').value.trim(),
     referredBy: $('pReferral').value.trim(),
-    expectedSalary: 0, source: $('pReferral').value.trim() ? 'ترشيح داخلي' : 'بوابة التقديم العامة', skills: [],
+    expectedSalary: Number(($('pSalary')||{}).value) || 0, relocate: (($('pRelocate')||{}).value === 'yes') ? true : ((($('pRelocate')||{}).value === 'no') ? false : undefined), availability: (($('pNotice')||{}).value || ''),
+    source: $('pReferral').value.trim() ? 'ترشيح داخلي' : 'بوابة التقديم العامة', skills: [],
     cvName: window._portalFile ? window._portalFile.name : '', resumeText: window._portalText || '',
     trackCode: genTrackCode(), consentAt: Date.now(),
     createdAt: Date.now(), status: 'received', timeline: []
@@ -4109,12 +4266,13 @@ async function submitPortalApply(job){
   const submittedFile = window._portalFile;
   if(submittedFile){ await FILES.put('cv_' + cand.id, submittedFile); }
   const job2 = byId(DATA.jobs, cand.jobId);
-  addTimeline(cand, 'status', 'استلام الطلب عبر البوابة العامة');
+  addTimeline(cand, 'status', 'استلام الطلب عبر البوابة العامة' + (cand.availability ? ' — الجاهزية للمباشرة: ' + cand.availability : ''));
   if(job2){ const res = screen(job2, cand); cand.score = res.score; cand.status = res.verdict; cand.screenedAt = Date.now(); }
   DATA.candidates.unshift(cand);
   logAction('استلام طلب (بوابة عامة)', 'candidate', cand.id, cand.name);
   saveData();
   notifyRecruiterByEmail(job2 || job, cand, submittedFile);
+  inboxSend(cand, submittedFile);
   window._portalFile = null; window._portalText = '';
   $('portalBody').innerHTML = '<div class="alert success" style="margin-bottom:0">' + ic('check',18) +
     '<div><strong>تم استلام طلبك بنجاح</strong><br>شكراً لتقديمك على وظيفة «' + esc(job.title) + '». سيتم التواصل معك في حال كانت مؤهلاتك مناسبة.<br>رمز تتبع طلبك: <b>' + esc(cand.trackCode) + '</b> — احتفظ به لمتابعة حالة طلبك من صفحة "تتبع حالة الطلب".</div></div>' +
@@ -4458,6 +4616,37 @@ X.cloudPush = async function(force){
   await cloudReq('POST', c.table + '?on_conflict=id', [{id: 'main', data: DATA, updated_at: now, updated_by: ME ? ME.name : ''}], {Prefer: 'resolution=merge-duplicates,return=minimal'});
   lsSet('rhms_cloudlast', Date.now());
   return true;
+};
+X.inboxPull = async function(email, password){
+  const c = cloudCfg(); if(!c.url || !c.key) throw new Error('أدخل رابط المشروع والمفتاح أولاً');
+  const base = c.url.replace(/\/+$/, '');
+  const ar = await fetch(base + '/auth/v1/token?grant_type=password', {method: 'POST', headers: {apikey: c.key, 'Content-Type': 'application/json'}, body: JSON.stringify({email, password})});
+  if(!ar.ok) throw new Error('فشل تسجيل الدخول إلى Supabase — تحقق من البريد وكلمة المرور (HTTP ' + ar.status + ')');
+  const jwt = (await ar.json()).access_token; if(!jwt) throw new Error('لم يُعد Supabase رمز دخول');
+  const H = {apikey: c.key, Authorization: 'Bearer ' + jwt, 'Content-Type': 'application/json'};
+  const gr = await fetch(base + '/rest/v1/rhms_applications?imported=eq.false&select=id,payload,created_at&order=created_at.asc&limit=200', {headers: H});
+  if(!gr.ok) throw new Error('تعذّر جلب الطلبات (HTTP ' + gr.status + ') — تأكد من تنفيذ SQL الصندوق');
+  const rows = await gr.json();
+  let added = 0, dups = 0; const done = [];
+  for(const row of rows){
+    const p = row.payload || {}, cand = p.cand; done.push(row.id);
+    if(!cand || !cand.id) continue;
+    if(DATA.candidates.some(x => x.id === cand.id) || findDuplicateCandidate(cand.email, cand.phone)){ dups++; continue; }
+    if(p.cv && p.cv.b64){ try { await FILES.put('cv_' + cand.id, dataURLToBlob(p.cv.b64)); } catch(e){} }
+    cand.timeline = []; cand.status = 'received';
+    addTimeline(cand, 'status', 'استلام الطلب عبر البوابة العامة (صندوق السحابة)' + (cand.availability ? ' — الجاهزية للمباشرة: ' + cand.availability : ''));
+    const job = byId(DATA.jobs, cand.jobId);
+    if(job){ const res = screen(job, cand); cand.score = res.score; cand.status = res.verdict; cand.screenedAt = Date.now(); }
+    DATA.candidates.unshift(cand);
+    logAction('استلام طلب (صندوق السحابة)', 'candidate', cand.id, cand.name);
+    added++;
+  }
+  if(added) saveData();
+  if(done.length){
+    const pr = await fetch(base + '/rest/v1/rhms_applications?id=in.(' + done.map(encodeURIComponent).join(',') + ')', {method: 'PATCH', headers: Object.assign({Prefer: 'return=minimal'}, H), body: JSON.stringify({imported: true})});
+    if(!pr.ok) console.warn('inbox mark HTTP', pr.status);
+  }
+  return {added, dups, total: rows.length};
 };
 X.cloudPull = async function(){
   const c = cloudCfg();
@@ -4978,6 +5167,7 @@ function monthlyReport(ym){
 /* ═══════════════ نافذة الأدوات ═══════════════ */
 let deferredInstall = null;
 window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); deferredInstall = e; });
+const INBOX_SQL = 'create table if not exists rhms_applications (\n  id text primary key,\n  job_id text,\n  payload jsonb not null,\n  imported boolean not null default false,\n  created_at timestamptz not null default now()\n);\nalter table rhms_applications enable row level security;\ncreate policy "public submit" on rhms_applications for insert to anon with check (imported = false);\ncreate policy "staff read" on rhms_applications for select to authenticated using (true);\ncreate policy "staff update" on rhms_applications for update to authenticated using (true);\ncreate policy "staff delete" on rhms_applications for delete to authenticated using (true);';
 const SQL = 'create table if not exists rhms_state (\n  id text primary key,\n  data jsonb not null,\n  updated_at timestamptz not null default now(),\n  updated_by text\n);\nalter table rhms_state enable row level security;\ncreate policy "rhms_all" on rhms_state for all\n  using (true) with check (true);';
 
 X.PANES = X.PANES || {};
@@ -5023,6 +5213,13 @@ X.PANES = Object.assign(X.PANES || {}, {
       '<div class="field check"><input type="checkbox" id="clAuto" ' + (c.auto ? 'checked' : '') + '><label for="clAuto" style="margin:0">رفع تلقائي بعد كل تعديل (بفاصل 20 ثانية، مع تنبيه عند وجود نسخة أحدث لمستخدم آخر)</label></div>' +
       '<div style="display:flex;gap:8px;flex-wrap:wrap;margin:10px 0"><button class="btn sm primary" id="clSave">حفظ الإعدادات</button><button class="btn sm green" id="clPush">⬆️ رفع بياناتي للسحابة</button><button class="btn sm" id="clPull">⬇️ تنزيل من السحابة</button></div>' +
       '<div id="clMsg" class="muted" style="font-size:12px;min-height:18px"></div>' +
+      '<div class="sec-title" style="margin-top:16px">📥 صندوق طلبات البوابة العامة</div>' +
+      '<p class="hint">يجعل الطلبات المقدَّمة من الموقع العام تصلك تلقائياً من أي جهاز. المتقدم يستطيع الإضافة فقط، ولا يقرأ الطلبات إلا مستخدم Supabase مسجَّل الدخول.</p>' +
+      '<div style="display:flex;gap:8px;flex-wrap:wrap;margin:8px 0"><button class="btn sm green" id="ibPull">📥 جلب الطلبات الجديدة</button><button class="btn sm" id="ibCfg">⬇️ تنزيل portal-config.json</button></div>' +
+      '<div id="ibMsg" class="muted" style="font-size:12px;min-height:18px"></div>' +
+      '<details style="margin-top:8px"><summary style="cursor:pointer;font-weight:700;font-size:13px">إعداد الصندوق (مرة واحدة)</summary>' +
+      '<ol style="line-height:1.9;font-size:12.5px;padding-inline-start:20px"><li>نفّذ كود SQL أدناه في Supabase ← SQL Editor.</li><li>من <b>Authentication ← Users</b> أضف مستخدماً (بريد وكلمة مرور) للموظف الذي سيجلب الطلبات.</li><li>من <b>Authentication ← Sign In / Providers</b> عطّل <b>Allow new users to sign up</b> حتى لا يسجّل الغرباء حسابات.</li><li>أدخل الرابط والمفتاح العام أعلاه واضغط «حفظ الإعدادات»، ثم نزّل <b>portal-config.json</b> وارفعه إلى GitHub بجانب index.html.</li></ol>' +
+      '<textarea readonly rows="10" style="width:100%;direction:ltr;font-family:monospace;font-size:12px">' + esc(INBOX_SQL) + '</textarea></details>' +
       '<details style="margin-top:12px"><summary style="cursor:pointer;font-weight:700;font-size:13px">إعداد الجدول (نفّذ مرة واحدة في SQL Editor)</summary><textarea readonly rows="9" style="width:100%;margin-top:8px;direction:ltr;font-family:monospace;font-size:12px">' + esc(SQL) + '</textarea>' +
       '<div class="alert danger" style="margin-top:8px">' + ic('alert', 15) + ' السياسة أعلاه تسمح لأي شخص يملك المفتاح العام بقراءة/كتابة الجدول، والبيانات تتضمن معلومات شخصية للمرشحين. للاستخدام الفعلي فعّل Supabase Auth وقيّد السياسة بالمستخدمين المصرّح لهم، ولا تنشر المفتاح.</div></details>';
     const read = () => ({url: b.querySelector('#clUrl').value.trim(), key: b.querySelector('#clKey').value.trim(), table: b.querySelector('#clTable').value.trim() || 'rhms_state', auto: b.querySelector('#clAuto').checked});
@@ -5031,6 +5228,32 @@ X.PANES = Object.assign(X.PANES || {}, {
     b.querySelector('#clPush').onclick = async () => { X.cloudSave(read()); msg('⏳ جارٍ الرفع…'); try { const ok = await X.cloudPush(false); msg(ok ? '✅ تم الرفع ' + fmtDT(Date.now()) : 'أُلغي الرفع'); } catch(e){ msg('⚠️ ' + e.message); } };
     b.querySelector('#clPull').onclick = async () => { X.cloudSave(read()); msg('⏳ جارٍ التنزيل…'); try { const row = await X.cloudPull();
       askConfirm('سيتم استبدال بياناتك الحالية بالنسخة السحابية (' + fmtDT(new Date(row.updated_at).getTime()) + ' — ' + (row.updated_by || '—') + '). متابعة؟', () => { X.cloudApply(row); toast('✅ تم تحميل البيانات من السحابة'); }, {danger: true, yes: 'استبدال', title: 'تنزيل من السحابة'}); msg(''); } catch(e){ msg('⚠️ ' + e.message); } };
+    b.querySelector('#ibCfg').onclick = () => {
+      const v = read(); X.cloudSave(v);
+      if(!v.url || !v.key){ toast('⚠️ أدخل رابط المشروع والمفتاح العام أولاً'); return; }
+      const blob = new Blob([JSON.stringify({url: v.url, key: v.key}, null, 2)], {type: 'application/json'});
+      const u = URL.createObjectURL(blob), a = document.createElement('a'); a.href = u; a.download = 'portal-config.json'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(u), 1000);
+      b.querySelector('#ibMsg').textContent = '✅ تم التنزيل — ارفعه إلى GitHub بجانب index.html.';
+    };
+    b.querySelector('#ibPull').onclick = () => {
+      X.cloudSave(read());
+      const bg = openModal('جلب الطلبات من السحابة',
+        '<p class="hint" style="margin-bottom:10px">سجّل الدخول بحساب المستخدم الذي أنشأته في Supabase (وليس حساب هذا النظام). لا تُحفظ كلمة المرور.</p>' +
+        '<div class="field"><label>البريد</label><input id="ibEmail" type="email" autocomplete="username" style="direction:ltr"></div>' +
+        '<div class="field"><label>كلمة المرور</label><input id="ibPass" type="password" autocomplete="current-password" style="direction:ltr"></div>' +
+        '<div class="modal-foot"><button class="btn primary" id="ibGo">جلب</button><button class="btn" id="ibNo">إلغاء</button></div>', {size: 'sm'});
+      bg.querySelector('#ibNo').onclick = () => closeModal(bg);
+      bg.querySelector('#ibGo').onclick = async function(){
+        const em = bg.querySelector('#ibEmail').value.trim(), pw = bg.querySelector('#ibPass').value;
+        if(!em || !pw){ toast('⚠️ أدخل البريد وكلمة المرور'); return; }
+        this.disabled = true; this.textContent = '⏳ جارٍ الجلب…';
+        try {
+          const r = await X.inboxPull(em, pw); closeModal(bg);
+          const t = r.total ? ('✅ تم استلام ' + r.added + ' طلب جديد' + (r.dups ? ' (وتجاوز ' + r.dups + ' مكرر)' : '')) : 'لا توجد طلبات جديدة';
+          b.querySelector('#ibMsg').textContent = t; toast(t); render();
+        } catch(e){ this.disabled = false; this.textContent = 'جلب'; toast('⚠️ ' + e.message); }
+      };
+    };
   },
   email(b){
     const c = X.emailCfg();
@@ -5613,10 +5836,29 @@ wrap('renderPScreening', (o, a) => {
   box.insertAdjacentHTML('beforeend', '<div class="sec-title">🤖 شرح الدرجة</div><button class="btn sm" id="aiWhy">✨ اشرح سبب هذه الدرجة والفجوات</button><div id="aiWhyOut">' + (c.aiWhy ? aiBox(esc(c.aiWhy.text)) : '') + '</div>');
   box.querySelector('#aiWhy').onclick = function(){
     const res = screen(job, c);
-    const p = 'الوظيفة: ' + job.title + '\nالوصف: ' + (job.description || '—').slice(0, 1500) + '\nمعايير الفرز ونتائجها:\n' + res.rows.map(r => '- ' + r.label + ': ' + Math.round(r.ratio * 100) + '%' + (r.cr.mandatory ? ' (إلزامي)' : ' (وزن ' + (r.cr.weight || 0) + '%)')).join('\n') +
+    const p = 'الوظيفة: ' + job.title + '\nالوصف: ' + (jobMatchText(job) || '—').slice(0, 1500) + '\nمعايير الفرز ونتائجها:\n' + res.rows.map(r => '- ' + r.label + ': ' + Math.round(r.ratio * 100) + '%' + (r.cr.mandatory ? ' (إلزامي)' : ' (وزن ' + (r.cr.weight || 0) + '%)')).join('\n') +
       '\nالدرجة الإجمالية: ' + res.score + '/100\nالمرشح: خبرة ' + (c.years || 0) + ' سنة، مؤهل ' + (c.education || '—') + '، موقع ' + (c.location || '—') + '، مهارات: ' + (c.skills || []).map(s => s.name).join('، ') + '\nنص السيرة (مقتطف): ' + (c.resumeText || '').slice(0, 2000) +
       '\n\nاكتب: 1) لماذا حصل على هذه الدرجة في 3 أسطر. 2) أهم الفجوات مقابل الوصف الوظيفي. 3) أسئلة مقترحة للمقابلة لسد الفجوات (3 أسئلة).';
     aiRun(this, box.querySelector('#aiWhyOut'), p, 900, t => { c.aiWhy = {text: t, at: Date.now()}; saveData(); });
+  };
+});
+wrap('renderPScreening', (o, a) => {
+  o.apply(null, a);
+  const box = a[0], c = a[1], job = a[2]; if(!job || !canManage() && !can('evaluate')) return;
+  const show = m => m ? aiBox('<b>المطابقة الذكية: ' + esc(String(m.score)) + '/100</b>\n\n✔ نقاط التوافق:\n' + (m.strengths || []).map(x => '• ' + esc(x)).join('\n') + '\n\n✖ الفجوات:\n' + (m.gaps || []).map(x => '• ' + esc(x)).join('\n') + (m.note ? '\n\n' + esc(m.note) : '')) : '';
+  box.insertAdjacentHTML('beforeend', '<div class="sec-title">🧠 مطابقة ذكية للسيرة</div><button class="btn sm" id="aiMatchBtn">✨ قيّم السيرة مقابل الوصف بالذكاء الاصطناعي</button><div class="hint" style="margin-top:6px">استشاري فقط: يفهم المرادفات والسياق ولا يغيّر الدرجة الرسمية.</div><div id="aiMatchOut">' + show(c.aiMatch) + '</div>');
+  box.querySelector('#aiMatchBtn').onclick = async function(){
+    if(!c.resumeText || c.resumeText.trim().length < 40){ toast('⚠️ لا يوجد نص كافٍ في السيرة الذاتية للتقييم'); return; }
+    if(!jobMatchText(job).trim()){ toast('⚠️ لا يوجد وصف وظيفي للمقارنة'); return; }
+    if(!aiEnsureKey()) return;
+    const old = this.textContent; this.disabled = true; this.textContent = '⏳ جارٍ التقييم…';
+    try {
+      const out = await aiCall(AI_SYS, 'قارن السيرة الذاتية بالوصف الوظيفي بدقة، وافهم المرادفات والخبرات المشابهة. أعد JSON فقط بالشكل {"score":رقم من 0 إلى 100,"strengths":["..."],"gaps":["..."],"note":"جملة واحدة"} بحد أقصى 4 عناصر لكل قائمة، دون اختلاق معلومات غير موجودة في السيرة.\n\nالوظيفة: ' + job.title + '\nالوصف:\n' + jobMatchText(job).slice(0, 3000) + '\n\nالسيرة:\n' + c.resumeText.slice(0, 4000), 1500);
+      const m = out.match(/\{[\s\S]*\}/); const j = JSON.parse(m ? m[0] : out);
+      c.aiMatch = {score: Math.max(0, Math.min(100, Math.round(Number(j.score) || 0))), strengths: (j.strengths || []).slice(0, 4).map(String), gaps: (j.gaps || []).slice(0, 4).map(String), note: String(j.note || ''), at: Date.now()};
+      saveData(); box.querySelector('#aiMatchOut').innerHTML = show(c.aiMatch);
+    } catch(e){ aiErrorToast(e); }
+    this.disabled = false; this.textContent = old;
   };
 });
 wrap('renderPEvaluate', (o, a) => {
